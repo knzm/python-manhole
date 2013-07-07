@@ -31,6 +31,7 @@ except ImportError:
     pthread_setname_np = lambda ident, name: None
 
 SO_PEERCRED = 17
+LOCAL_PEERCRED = 0x001
 
 def cry(message):
     """
@@ -42,12 +43,38 @@ def cry(message):
         except: #pylint: disable=W0702
             pass
 
+def is_linux():
+    return sys.platform.startswith("linux")
+
+def is_freebsd():
+    return sys.platform.startswith("freebsd")
+
+def is_macosx():
+    return sys.platform == "darwin"
+
 def get_peercred(sock):
     """Gets the (pid, uid, gid) for the client on the given *connected* socket."""
 
-    return struct.unpack('3i', sock.getsockopt(
-        socket.SOL_SOCKET, SO_PEERCRED, struct.calcsize('3i')
-    ))
+    if is_linux():
+        # This platform uses SO_PEERCRED
+        return struct.unpack('3i', sock.getsockopt(
+                socket.SOL_SOCKET, SO_PEERCRED, struct.calcsize('3i')))
+
+    elif is_macosx() or is_freebsd():
+        # These platforms use LOCAL_PEERCRED
+        res = struct.unpack('2ihi', sock.getsockopt(
+                0, LOCAL_PEERCRED, struct.calcsize('2ihi')))
+
+        # Check this is the above version of the structure
+        if res[0] != 0:
+            raise OSError
+
+        return (None, res[1], res[3])
+
+    else:
+        # Currently unsupported: windows, cygwin, os2, etc...
+        raise OSError
+
 
 class SuspiciousClient(Exception):
     pass
@@ -120,8 +147,11 @@ class ManholeConnection(threading.Thread):
 
         cry("Accepted connection %s from %s" % (client, client_name))
         pthread_setname_np(self.ident, "Manhole %s" % pid)
-        client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 0)
-        client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 0)
+        try:
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 0)
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 0)
+        except socket.error:
+            logger.warn("Unable to set the socket's buffers.", exc_info=True)
         backup = []
         try:
             client_fd = client.fileno()
